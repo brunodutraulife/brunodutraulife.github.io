@@ -20,14 +20,16 @@ import { getAuth, createUserWithEmailAndPassword,
          onAuthStateChanged, updatePassword,
          EmailAuthProvider, reauthenticateWithCredential }
                                                    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { deleteApp }
+                                                   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 
 const firebaseConfig = {
-  apiKey:            "AIzaSyCTLrgzER3SxJ8ikcR9WlEu5OF_gBtGq0Y",
-  authDomain:        "portal-clinica-unisul.firebaseapp.com",
-  projectId:         "portal-clinica-unisul",
-  storageBucket:     "portal-clinica-unisul.firebasestorage.app",
-  messagingSenderId: "805250456549",
-  appId:             "1:805250456549:web:bb92781023fc786ae6ed0c"
+  apiKey:            "PASTE_YOUR_API_KEY",
+  authDomain:        "PASTE_YOUR_AUTH_DOMAIN",
+  projectId:         "PASTE_YOUR_PROJECT_ID",
+  storageBucket:     "PASTE_YOUR_STORAGE_BUCKET",
+  messagingSenderId: "PASTE_YOUR_MESSAGING_SENDER_ID",
+  appId:             "PASTE_YOUR_APP_ID"
 };
 
 const app  = initializeApp(firebaseConfig);
@@ -40,6 +42,7 @@ window._fs  = { doc, collection, getDocs, setDoc, deleteDoc, writeBatch, getDoc 
 window._authFns = { createUserWithEmailAndPassword, signInWithEmailAndPassword,
                     signOut, onAuthStateChanged, updatePassword,
                     EmailAuthProvider, reauthenticateWithCredential };
+window._deleteApp = deleteApp;
 window._firebaseReady = true;
 window.dispatchEvent(new Event("firebaseReady"));
 </script>
@@ -1792,19 +1795,41 @@ async function createProfAccount(){
   if(!/^[a-zA-Z][a-zA-Z0-9._-]*$/.test(user)){showToast("⚠️ Use apenas letras, números e ponto (ex: bruno.schulte)","var(--yellow)");return;}
   const email=profEmail(user);
   const clinicForProf = role==="admin"?null:role;
+  setSyncBadge("saving");
   try{
-    const cred=await authFns.createUserWithEmailAndPassword(auth,email,pwd);
-    await fs.setDoc(fs.doc(db,"users",cred.user.uid),{
-      email, username:user, role, clinic:clinicForProf, createdAt:new Date().toISOString()
+    // Use a secondary Firebase app instance so the admin session is NEVER interrupted
+    const { initializeApp: _initApp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+    const { getAuth: _getAuth, createUserWithEmailAndPassword: _create } =
+      await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js");
+
+    const secondaryApp  = _initApp(window._db.app.options, "secondary-"+Date.now());
+    const secondaryAuth = _getAuth(secondaryApp);
+
+    const cred = await _create(secondaryAuth, email, pwd);
+    const newUid = cred.user.uid;
+
+    // Sign out of secondary app and delete it immediately — admin session untouched
+    await secondaryAuth.signOut();
+    await window._deleteApp(secondaryApp);
+
+    // Write profile to Firestore using the main app (admin still logged in)
+    await fs.setDoc(fs.doc(db,"users",newUid),{
+      email, username:user, role,
+      clinic: clinicForProf,
+      createdAt: new Date().toISOString()
     });
-    const adminPwd=prompt("Para confirmar, digite sua senha de administrador:")||"";
-    await authFns.signInWithEmailAndPassword(auth,currentUserEmail,adminPwd);
+
     document.getElementById("profUser").value="";
     document.getElementById("profPwd").value="";
+    setSyncBadge("ok");
     showToast(`✅ Conta criada: ${user}`);
+    renderAdmin();
   }catch(e){
-    if(e.code==="auth/email-already-in-use") showToast("⚠️ E-mail já cadastrado","var(--red)");
-    else showToast("Erro: "+e.message,"var(--red)");
+    setSyncBadge("err");
+    if(e.code==="auth/email-already-in-use")
+      showToast("⚠️ Identificador já cadastrado — escolha outro","var(--red)");
+    else
+      showToast("Erro ao criar conta: "+e.message,"var(--red)");
   }
 }
 
@@ -2021,7 +2046,13 @@ async function addStudent(){
   if(DB.find(s=>s.matricula===mat)){showToast("\u26a0\ufe0f Matr\u00edcula j\u00e1 existe","var(--red)");return;}
   const email=studentEmail(mat);
   try{
-    const cred=await authFns.createUserWithEmailAndPassword(auth,email,pwd);
+    // Use secondary app to avoid kicking out the professor/admin session
+    const { initializeApp: _initApp2 } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+    const { getAuth: _getAuth2, createUserWithEmailAndPassword: _create2 } =
+      await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js");
+    const secondaryApp  = _initApp2(window._db.app.options, "sec-stu-"+Date.now());
+    const secondaryAuth = _getAuth2(secondaryApp);
+    const cred=await _create2(secondaryAuth,email,pwd);
     const sid=String(Date.now());
     await fs.setDoc(fs.doc(db,"users",cred.user.uid),{
       email,role:"student",matricula:mat,clinic:cls,createdAt:new Date().toISOString()
@@ -2030,8 +2061,9 @@ async function addStudent(){
       practicalAvg:0,practicalCount:0,seminario:0,teorica1:0,teorica2:0,finalGrade:0,result:"Pendente",
       grades:Array.from({length:35},(_,i)=>({n:i+1,score:null,teacher:"",date:"",feedback:""}))};
     DB.push(s); await saveStudent(s);
-    const profPwd=prompt(`Confirme sua senha (${currentUsername||currentUserEmail}) para continuar:`)||"";
-    await authFns.signInWithEmailAndPassword(auth,currentUserEmail,profPwd);
+    // Sign out secondary, delete it — main session intact
+    await secondaryAuth.signOut();
+    await window._deleteApp(secondaryApp);
     document.getElementById("nName").value="";
     document.getElementById("nMat").value="";
     document.getElementById("nPwd").value="";
